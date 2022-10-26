@@ -1,4 +1,3 @@
-
 from collections import OrderedDict
 
 import numpy as np
@@ -6,7 +5,7 @@ import numpy as np
 from neurokernel.LPU.NDComponents.MembraneModels.BaseMembraneModel import BaseMembraneModel
 
 class MorrisLecar(BaseMembraneModel):
-    params = ['V1', 'V2', 'V3', 'V4', 'phi', 'offset',
+    params = ['V1', 'V2', 'V3', 'V4', 'phi', 'offset', 'C',
               'V_L', 'V_Ca', 'V_K', 'g_L', 'g_Ca', 'g_K']
     extra_params = ['initV', 'initn']
     internals = OrderedDict([('V', -70.0), ('n', 0.3525)])
@@ -16,8 +15,10 @@ class MorrisLecar(BaseMembraneModel):
         return 1e-5
 
     def pre_run(self, update_pointers):
+        print(self.params_dict['initV'])
         super(MorrisLecar, self).pre_run(update_pointers)
         self.add_initializer('initn', 'n', update_pointers)
+        print(self.internal_states['V'])
 
     def get_update_template(self):
         template = """
@@ -29,18 +30,17 @@ __device__ %(internal_n)s compute_n(%(update_V)s V, %(internal_n)s n, %(param_V3
 }
 
 __device__ %(update_V)s compute_V(%(update_V)s V, %(internal_n)s n, %(input_I)s I, %(param_V1)s V1, %(param_V2)s V2,
-                           %(param_offset)s offset, %(param_V_L)s V_L, %(param_V_Ca)s V_Ca,
+                           %(param_offset)s offset, %(param_C)s C, %(param_V_L)s V_L, %(param_V_Ca)s V_Ca,
                            %(param_V_K)s V_K, %(param_g_L)s g_L, %(param_g_K)s g_K, %(param_g_Ca)s g_Ca)
 {
     %(update_V)s m_inf = 0.5 * (1+tanh((V - V1)/V2));
-    %(update_V)s dV = (I - g_L * (V - V_L) - g_K * n * (V - V_K) - g_Ca * m_inf * (V - V_Ca) + offset);
+    %(update_V)s dV = ((I - g_L * (V - V_L) - g_K * n * (V - V_K) - g_Ca * m_inf * (V - V_Ca) + offset))/C;
     return dV;
 }
 
-__global__ void
-update(int num_comps, %(dt)s dt, int nsteps,
+__global__ void update(int num_comps, %(dt)s dt, int nsteps,
                       %(input_I)s* g_I, %(param_V1)s* g_V1, %(param_V2)s* g_V2, %(param_V3)s* g_V3,
-                      %(param_V4)s* g_V4, %(param_phi)s* g_phi, %(param_offset)s* g_offset,
+                      %(param_V4)s* g_V4, %(param_phi)s* g_phi, %(param_offset)s* g_offset, %(param_C)s* g_C,
                       %(param_V_L)s* g_V_L, %(param_V_Ca)s* g_V_Ca, %(param_V_K)s* g_V_K,
                       %(param_g_L)s* g_g_L, %(param_g_Ca)s* g_g_Ca, %(param_g_K)s* g_g_K,
                       %(internal_V)s* g_internalV, %(internal_n)s* g_n, %(update_V)s* g_V)
@@ -57,6 +57,7 @@ update(int num_comps, %(dt)s dt, int nsteps,
     %(param_V4)s V4;
     %(param_phi)s phi;
     %(param_offset)s offset;
+    %(param_C)s C;
     %(param_V_L)s V_L;
     %(param_V_Ca)s V_Ca;
     %(param_V_K)s V_K;
@@ -74,32 +75,32 @@ update(int num_comps, %(dt)s dt, int nsteps,
         V4 = g_V4[k];
         phi = g_phi[k];
         offset = g_offset[k];
+        C = g_C[k];
         V_L = g_V_L[k];
         V_Ca = g_V_Ca[k];
-        V_K = g_V_K[k];
-        g_L = g_g_L[k];
-        g_Ca = g_g_Ca[k];
-        g_K = g_g_K[k];
-        I = g_I[k];
+                V_K = g_V_K[k];
+                g_L = g_g_L[k];
+                g_Ca = g_g_Ca[k];
+                g_K = g_g_K[k];
+                I = g_I[k];
 
-        for(int i = 0; i < nsteps; ++i)
-        {
-            dn = compute_n(V, n, V3, V4, phi);
-            dV = compute_V(V, n, I, V1, V2,
-                           offset, V_L, V_Ca, V_K,
-                           g_L, g_K, g_Ca);
-            V += dV * dt * 1000;
-            n += dn * dt * 1000;
+                for(int i = 0; i < nsteps; ++i)
+                {
+                    dn = compute_n(V, n, V3, V4, phi);
+                    dV = compute_V(V, n, I, V1, V2,
+                                   offset, C, V_L, V_Ca, V_K,
+                                   g_L, g_K, g_Ca);
+                    V += dV * dt *1000;
+                    n += dn * dt *1000;
+                }
+
+                g_V[k] = V;
+                g_internalV[k] = V;
+                g_n[k] = n;
+            }
         }
-
-        g_V[k] = V;
-        g_internalV[k] = V;
-        g_n[k] = n;
-    }
-}
-"""
+        """
         return template
-
 
 if __name__ == '__main__':
     import argparse
@@ -152,6 +153,7 @@ if __name__ == '__main__':
                'V4': 20.,
                'phi': 0.001,
                'offset': 0.,
+               'C': 1.0,
                'V_L': -40.,
                'V_Ca': 120.,
                'V_K': -80.,
